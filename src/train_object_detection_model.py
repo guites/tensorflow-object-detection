@@ -73,9 +73,9 @@ def check_wanted_augmentation(wanted_augmentation, data_augmentation_options):
         )
 
 
-def create_model_directory(model_name):
-    os.makedirs(f"{MODELS_PATH}/{model_name}")
-    os.makedirs(f"{ANNOTATIONS_PATH}")
+def create_model_directory(model_name, exist_ok: bool):
+    os.makedirs(f"{MODELS_PATH}/{model_name}", exist_ok=exist_ok)
+    os.makedirs(f"{ANNOTATIONS_PATH}", exist_ok=exist_ok)
 
 
 def define_labels(classes):
@@ -285,9 +285,9 @@ def convert_object_detection_model_to_tflite(model_name):
 
 
 def train_object_detection_model(
-    dataset_name="garage_door_pascal_voc",
+    dataset_name="PPE-Detection",
     classes=[""],
-    output_model_prefix="detection_model",
+    output_model_name="detection_model",
     base_model_name="mobilenet_ssd",
     check_point="",
     input_shape=[224, 224],
@@ -311,16 +311,58 @@ def train_object_detection_model(
     evaluate=1,
     evaluate_timeout=600,
     annotation_format="yolo",
+    continue_existing_training: bool = True
 ):
-    time_stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    model_name = f"{output_model_prefix}_{time_stamp}"
-
     global DATASET_PATH
     global PIPELINE_CONFIG_PATH
     global ANNOTATIONS_PATH
     DATASET_PATH = os.path.join(DATASETS_PATH, dataset_name)
-    PIPELINE_CONFIG_PATH = os.path.join(MODELS_PATH, model_name, "pipeline.config")
-    ANNOTATIONS_PATH = os.path.join(MODELS_PATH, model_name, "annotations")
+    PIPELINE_CONFIG_PATH = os.path.join(MODELS_PATH, output_model_name, "pipeline.config")
+    ANNOTATIONS_PATH = os.path.join(MODELS_PATH, output_model_name, "annotations")
+
+    
+    if check_point and continue_existing_training is True:
+        raise ValueError("Cannot have both `check_point` and `continue_existing_training=True` at the same time.")
+    
+    if continue_existing_training:
+        # check whether the received `model_name` directory already exists
+        # and has valid checkpoints to load from
+        create_model_directory(output_model_name, exist_ok=True)
+        try:
+            check_point_path = get_latest_checkpoint(output_model_name)
+        except FileNotFoundError:
+            try:
+                check_point_path = get_latest_checkpoint(base_model_name)
+            except FileNotFoundError as error:
+                print(f"[!] Exiting: {str(error)}")
+                sys.exit(1)
+        check_point = os.path.basename(check_point_path)
+    else:
+        # if we don't want to load an ongoing training,
+        # we shouldn't allow users to repeat an existing model name
+        # `exist_ok=False` will raise an error if the model directory
+        # already exists
+        create_model_directory(output_model_name, exist_ok=False)
+
+        # check that the received check_point file exists, or that the base_model has any at all
+        if not check_point:
+            try:
+                check_point_path = get_latest_checkpoint(base_model_name)
+            except FileNotFoundError as error:
+                print(f"[!] Exiting: {str(error)}")
+                sys.exit(1)
+            check_point = os.path.basename(check_point_path)
+        else:
+            # TODO: this code is probably broken, we are not saving
+            # the return from get_checkpoint_by_partial to any variable
+            try:
+                get_checkpoint_by_partial(base_model_name, check_point)
+            except FileNotFoundError as error:
+                print(f"[!] Exiting: {str(error)}")
+                sys.exit(1)
+
+    print(f"[x] Starting training from checkpoint file `{check_point}`")
+    sys.exit(0)
 
     # check that dataset has been split into train/eval
     try:
@@ -328,8 +370,6 @@ def train_object_detection_model(
     except (FileNotFoundError, OSError):
         print(f"[!] Exiting: dataset {dataset_name} missing split.")
         sys.exit(1)
-
-    create_model_directory(model_name)
 
     # check whether we received the classes as params or
     # can read from classes.txt
@@ -341,21 +381,6 @@ def train_object_detection_model(
             print(f"[!] Exiting: {str(error)}")
             sys.exit(1)
         print(f"[x] Found class names: {', '.join(classes)}")
-
-    # check that received ckpt file exists, or that models has any at all
-    if check_point is None or check_point == "":
-        try:
-            check_point_path = get_latest_checkpoint(base_model_name)
-        except FileNotFoundError as error:
-            print(f"[!] Exiting: {str(error)}")
-            sys.exit(1)
-        check_point = os.path.basename(check_point_path)
-    else:
-        try:
-            get_checkpoint_by_partial(base_model_name, check_point)
-        except FileNotFoundError as error:
-            print(f"[!] Exiting: {str(error)}")
-            sys.exit(1)
 
     if wanted_augmentations == [""]:
         wanted_augmentations = []
@@ -374,7 +399,7 @@ def train_object_detection_model(
     generate_label_map(labels)
     generate_record("training", annotation_format, classes)
     generate_record("validation", annotation_format, classes)
-    copy_base_model(model_name, base_model_name)
+    copy_base_model(output_model_name, base_model_name)
 
     configure_pipeline(
         labels,
@@ -391,12 +416,12 @@ def train_object_detection_model(
 
     training_process = multiprocessing.Process(
         target=run_tf_object_detection_training_script,
-        kwargs={"model_name": model_name, "num_train_steps": num_train_steps},
+        kwargs={"model_name": output_model_name, "num_train_steps": num_train_steps},
     )
 
     evaluation_process = multiprocessing.Process(
         target=run_tf_object_detection_evaluation_script,
-        kwargs={"model_name": model_name, "evaluate_timeout": evaluate_timeout},
+        kwargs={"model_name": output_model_name, "evaluate_timeout": evaluate_timeout},
     )
 
     training_process.start()
@@ -407,7 +432,7 @@ def train_object_detection_model(
 
     training_process.join()
 
-    convert_object_detection_model_to_tflite(model_name)
+    convert_object_detection_model_to_tflite(output_model_name)
 
     if evaluate:
         evaluation_process.join()
@@ -418,10 +443,10 @@ def main():
     parser.add_argument("--dataset_name", type=str, default="garage_door_pascal_voc")
     parser.add_argument("--classes", type=str, nargs="+", default=[""])
     parser.add_argument(
-        "--output_model_prefix", type=str, default="object_detection_model"
+        "--output_model_name", type=str, default="object_detection_model"
     )
     parser.add_argument("--base_model_name", type=str, default="mobilenet_ssd")
-    parser.add_argument("--check_point", nargs="?", type=str, default="")
+    
     parser.add_argument("--input_shape", type=int, nargs="*", default=[224, 224])
     parser.add_argument("--num_train_steps", type=int, default=50000)
     parser.add_argument("--warmup_learning_rate", type=float, default=0.0)
@@ -448,12 +473,18 @@ def main():
     parser.add_argument("--evaluate", type=int, default=1)
     parser.add_argument("--evaluate_timeout", type=int, default=600)
     parser.add_argument("--annotation_format", type=str, default="yolo")
+
+    checkpoints_group = parser.add_mutually_exclusive_group()
+    checkpoints_group.add_argument("--check_point", nargs="?", type=str, default="", help="Specific checkpoint to load the `base_model_name` from")
+    checkpoints_group.add_argument("--continue_existing_training", type=bool, default=True, help="Attempt to continue training from the latest generated `output_model` checkpoint")
+
+
     args = parser.parse_args()
 
     train_object_detection_model(
         dataset_name=args.dataset_name,
         classes=args.classes,
-        output_model_prefix=args.output_model_prefix,
+        output_model_name=args.output_model_name,
         base_model_name=args.base_model_name,
         check_point=args.check_point,
         input_shape=args.input_shape,
@@ -466,6 +497,7 @@ def main():
         evaluate=args.evaluate,
         evaluate_timeout=args.evaluate_timeout,
         annotation_format=args.annotation_format,
+        continue_existing_training=args.continue_existing_training,
     )
 
 
