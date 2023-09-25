@@ -284,6 +284,51 @@ def convert_object_detection_model_to_tflite(model_name):
     convert_graph_to_tflite(model_name)
 
 
+def get_checkpoint_path(continue_existing_training, output_model_name, base_model_name, base_model_check_point) -> str:
+    if continue_existing_training:
+        # check whether the received `model_name` directory already exists
+        # and has valid checkpoints to load from
+        create_model_directory(output_model_name, exist_ok=True)
+        try:
+            check_point_path = get_latest_checkpoint(output_model_name)
+        except FileNotFoundError:
+            try:
+                check_point_path = get_latest_checkpoint(base_model_name)
+            except FileNotFoundError as error:
+                print(f"[!] Exiting: {str(error)}")
+                sys.exit(1)
+        return os.path.basename(check_point_path)
+
+    # if we don't want to load an ongoing training,
+    # we shouldn't allow users to repeat an existing model name
+    # `exist_ok=False` will raise an error if the model directory
+    # already exists
+    try:
+        create_model_directory(output_model_name, exist_ok=False)
+    except FileExistsError:
+        print(f"[!] Exiting: Model `{output_model_name}` already exists! Either set --continue_existing_training to 1 or choose a different `output_model` name.")
+        sys.exit(1)
+
+    # check that the received ckpt- file exists
+    if base_model_check_point:
+        # TODO: this code is probably broken, we are not saving
+        # the return from get_checkpoint_by_partial to any variable
+        try:
+            get_checkpoint_by_partial(base_model_name, base_model_check_point)
+        except FileNotFoundError as error:
+            print(f"[!] Exiting: {str(error)}")
+            sys.exit(1)
+    
+    # validade that the base_model has any valid ckpt- file
+    if not base_model_check_point:
+        try:
+            check_point_path = get_latest_checkpoint(base_model_name)
+        except FileNotFoundError as error:
+            print(f"[!] Exiting: {str(error)}")
+            sys.exit(1)
+        return os.path.basename(check_point_path)
+
+
 def train_object_detection_model(
     dataset_name="PPE-Detection",
     classes=[""],
@@ -311,7 +356,7 @@ def train_object_detection_model(
     evaluate=1,
     evaluate_timeout=600,
     annotation_format="yolo",
-    continue_existing_training: bool = True
+    continue_existing_training: int = 1
 ):
     global DATASET_PATH
     global PIPELINE_CONFIG_PATH
@@ -324,46 +369,9 @@ def train_object_detection_model(
     if check_point and continue_existing_training is True:
         raise ValueError("Cannot have both `check_point` and `continue_existing_training=True` at the same time.")
     
-    if continue_existing_training:
-        # check whether the received `model_name` directory already exists
-        # and has valid checkpoints to load from
-        create_model_directory(output_model_name, exist_ok=True)
-        try:
-            check_point_path = get_latest_checkpoint(output_model_name)
-        except FileNotFoundError:
-            try:
-                check_point_path = get_latest_checkpoint(base_model_name)
-            except FileNotFoundError as error:
-                print(f"[!] Exiting: {str(error)}")
-                sys.exit(1)
-        check_point = os.path.basename(check_point_path)
-    else:
-        # if we don't want to load an ongoing training,
-        # we shouldn't allow users to repeat an existing model name
-        # `exist_ok=False` will raise an error if the model directory
-        # already exists
-        create_model_directory(output_model_name, exist_ok=False)
-
-        # check that the received check_point file exists, or that the base_model has any at all
-        if not check_point:
-            try:
-                check_point_path = get_latest_checkpoint(base_model_name)
-            except FileNotFoundError as error:
-                print(f"[!] Exiting: {str(error)}")
-                sys.exit(1)
-            check_point = os.path.basename(check_point_path)
-        else:
-            # TODO: this code is probably broken, we are not saving
-            # the return from get_checkpoint_by_partial to any variable
-            try:
-                get_checkpoint_by_partial(base_model_name, check_point)
-            except FileNotFoundError as error:
-                print(f"[!] Exiting: {str(error)}")
-                sys.exit(1)
-
+    check_point = get_checkpoint_path()
     print(f"[x] Starting training from checkpoint file `{check_point}`")
-    sys.exit(0)
-
+    sys.exit(1)
     # check that dataset has been split into train/eval
     try:
         check_dataset_split(dataset_name)
@@ -476,10 +484,11 @@ def main():
 
     checkpoints_group = parser.add_mutually_exclusive_group()
     checkpoints_group.add_argument("--check_point", nargs="?", type=str, default="", help="Specific checkpoint to load the `base_model_name` from")
-    checkpoints_group.add_argument("--continue_existing_training", type=bool, default=True, help="Attempt to continue training from the latest generated `output_model` checkpoint")
-
+    checkpoints_group.add_argument("--continue_existing_training", type=int, default=1, help="Attempt to continue training from the latest generated `output_model` checkpoint")
 
     args = parser.parse_args()
+
+    print("--continue_existing_training", args.continue_existing_training)
 
     train_object_detection_model(
         dataset_name=args.dataset_name,
